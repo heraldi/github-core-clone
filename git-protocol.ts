@@ -11,18 +11,30 @@ const codes: Record<number, GitObjectType> = {1:'commit',2:'tree',3:'blob',4:'ta
 const oidPattern = /^[0-9a-f]{40}$/;
 const asBuffer = (x: Uint8Array) => Buffer.isBuffer(x) ? x : Buffer.from(x.buffer, x.byteOffset, x.byteLength);
 
-/** Encode one data pkt-line, including its four ASCII-hex length bytes. */
-export function encodePktLine(payload: string | Uint8Array): Buffer {
-  const data = typeof payload === 'string' ? Buffer.from(payload) : asBuffer(payload);
-  const size = data.length + 4;
-  if (size > 0xffff) throw new Error('pkt-line exceeds the 4-hex-digit maximum');
-  return Buffer.concat([Buffer.from(size.toString(16).padStart(4, '0')), data]);
+/** Encode data pkt-lines into a single preallocated wire buffer. */
+export function encodePktLines(lines: ReadonlyArray<string | Uint8Array | 'flush' | 'delim' | 'response-end'>): Buffer {
+  const payloads = lines.map(line => line === 'flush' || line === 'delim' || line === 'response-end' ? null : typeof line === 'string' ? Buffer.from(line) : asBuffer(line));
+  let total = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const marker = lines[i] === 'flush' ? 0 : lines[i] === 'delim' ? 1 : lines[i] === 'response-end' ? 2 : -1;
+    const size = marker < 0 ? payloads[i]!.length + 4 : 4;
+    if (marker < 0 && size > 0xffff) throw new Error('pkt-line exceeds the 4-hex-digit maximum');
+    total += size;
+  }
+  const out = Buffer.allocUnsafe(total);
+  let at = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i], marker = line === 'flush' ? 0 : line === 'delim' ? 1 : line === 'response-end' ? 2 : -1;
+    if (marker >= 0) { out.write(marker.toString(16).padStart(4, '0'), at, 4, 'ascii'); at += 4; continue; }
+    const payload = payloads[i]!;
+    out.write((payload.length + 4).toString(16).padStart(4, '0'), at, 4, 'ascii'); at += 4;
+    payload.copy(out, at); at += payload.length;
+  }
+  return out;
 }
+export function encodePktLine(payload: string | Uint8Array): Buffer { return encodePktLines([payload]); }
 export const pktLineFlush = () => Buffer.from('0000');
 export const pktLineDelim = () => Buffer.from('0001');
-export function encodePktLines(lines: ReadonlyArray<string | Uint8Array | 'flush' | 'delim' | 'response-end'>): Buffer {
-  return Buffer.concat(lines.map(line => line === 'flush' ? pktLineFlush() : line === 'delim' ? pktLineDelim() : line === 'response-end' ? Buffer.from('0002') : encodePktLine(line)));
-}
 
 /** Decode a complete pkt-line stream; malformed and truncated lengths are rejected. */
 export function decodePktLines(input: Uint8Array, options: {allowTrailing?: boolean} = {}): Packet[] {
